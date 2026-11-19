@@ -70,8 +70,26 @@ stages:
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+      - name: Wait for SSH port to open
+        run: |
+          HOST="${{ steps.get_ip.outputs.instance_ip }}"
+          for i in $(seq 1 24); do
+            if ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 \
+                -i ~/.ssh/deploy_key ${{ secrets.SSH_USER }}@"$HOST" true 2>/dev/null; then
+              echo "SSH is ready"
+              break
+            fi
+            echo "Attempt $i/24: SSH not ready yet, waiting 10s..."
+            sleep 10
+          done
       - name: Scan host key
-        run: ssh-keyscan -H "${{ steps.get_ip.outputs.instance_ip }}" >> ~/.ssh/known_hosts
+        run: |
+          HOST="${{ steps.get_ip.outputs.instance_ip }}"
+          for i in $(seq 1 12); do
+            ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null && echo "keyscan succeeded" && break
+            echo "Attempt $i/12: keyscan failed, retrying in 10s..."
+            sleep 10
+          done
       - name: Generate inventory
         run: |
           cat > ansible/inventory.ini <<EOF

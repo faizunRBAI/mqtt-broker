@@ -75,8 +75,17 @@ jobs:
         '
       env:
         SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+    - name: Wait for SSH port to open
+      run: "HOST=\"${{ steps.get_ip.outputs.instance_ip }}\"\nfor i in $(seq 1 24);\
+        \ do\n  if ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5\
+        \ \\\n      -i ~/.ssh/deploy_key ${{ secrets.SSH_USER }}@\"$HOST\" true 2>/dev/null;\
+        \ then\n    echo \"SSH is ready\"\n    break\n  fi\n  echo \"Attempt $i/24:\
+        \ SSH not ready yet, waiting 10s...\"\n  sleep 10\ndone\n"
     - name: Scan host key
-      run: ssh-keyscan -H "${{ steps.get_ip.outputs.instance_ip }}" >> ~/.ssh/known_hosts
+      run: "HOST=\"${{ steps.get_ip.outputs.instance_ip }}\"\nfor i in $(seq 1 12);\
+        \ do\n  ssh-keyscan -H \"$HOST\" >> ~/.ssh/known_hosts 2>/dev/null && echo\
+        \ \"keyscan succeeded\" && break\n  echo \"Attempt $i/12: keyscan failed,\
+        \ retrying in 10s...\"\n  sleep 10\ndone\n"
     - name: Generate inventory
       run: 'cat > ansible/inventory.ini <<EOF
 
