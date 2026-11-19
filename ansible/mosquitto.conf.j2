@@ -1,0 +1,21 @@
+# Mosquitto configuration — managed by OpsAgent Ansible
+
+# Persistence
+persistence true
+persistence_location /mosquitto/data/
+
+# Logging
+log_dest stdout
+log_type all
+
+# Plain MQTT listener (port 1883)
+listener 1883
+protocol mqtt
+allow_anonymous false
+password_file /mosquitto/config/passwd
+
+# MQTT over WebSocket (port 8080)
+listener 8080
+protocol websockets
+allow_anonymous false
+password_file /mosquitto/config/passwd

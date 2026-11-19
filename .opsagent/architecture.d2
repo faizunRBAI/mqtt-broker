@@ -1,0 +1,13 @@
+# opsagent:meta cloud=aws region=us-east-1 target=ec2
+
+internet: Internet { opsagent-type: generic.user; shape: rectangle }
+vpc: AWS VPC (Default) {
+  ec2: MQTT Broker (EC2 t3.micro) { opsagent-type: aws.ec2; shape: rectangle }
+  sg: Security Group { opsagent-type: generic.app; shape: rectangle }
+  eip: Elastic IP { opsagent-type: aws.ec2; shape: rectangle }
+}
+
+internet -> vpc.eip: MQTT :1883 / MQTTS :8883 / WS :8080
+vpc.eip -> vpc.ec2: forward traffic
+vpc.sg -> vpc.ec2: allow ports 22, 1883, 8883, 8080
+vpc.ec2 -> vpc.ec2: Mosquitto broker (Docker)\npersistent sessions + auth

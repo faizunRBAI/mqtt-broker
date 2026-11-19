@@ -1,0 +1,154 @@
+version: 1
+name: mqtt-broker
+vcs: github
+
+stages:
+  - id: provision
+    kind: provision
+    timeout_minutes: 20
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+      TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+      TF_VAR_mqtt_password: ${{ secrets.MQTT_PASSWORD }}
+    steps:
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.5
+      - name: Terraform Init
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+            -backend-config="region=us-east-1"
+        working-directory: infra
+      - name: Terraform Apply
+        run: terraform apply -input=false -auto-approve
+        working-directory: infra
+      - name: Get Outputs
+        id: tf_outputs
+        run: |
+          echo "instance_ip=$(terraform output -raw instance_ip)" >> "$GITHUB_OUTPUT"
+          echo "eip=$(terraform output -raw elastic_ip)" >> "$GITHUB_OUTPUT"
+        working-directory: infra
+
+  - id: configure
+    kind: configure
+    needs: [provision]
+    timeout_minutes: 20
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+      TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+      TF_VAR_mqtt_password: ${{ secrets.MQTT_PASSWORD }}
+      MQTT_PASSWORD: ${{ secrets.MQTT_PASSWORD }}
+    steps:
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.5
+      - name: Get instance IP
+        id: get_ip
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+            -backend-config="region=us-east-1"
+          echo "instance_ip=$(terraform output -raw instance_ip)" >> "$GITHUB_OUTPUT"
+        working-directory: infra
+      - name: Install Ansible
+        run: pip install ansible-core
+      - name: Write SSH key
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+      - name: Scan host key
+        run: ssh-keyscan -H "${{ steps.get_ip.outputs.instance_ip }}" >> ~/.ssh/known_hosts
+      - name: Generate inventory
+        run: |
+          cat > ansible/inventory.ini <<EOF
+          [broker]
+          ${{ steps.get_ip.outputs.instance_ip }} ansible_user=${{ secrets.SSH_USER }} ansible_ssh_private_key_file=~/.ssh/deploy_key
+          EOF
+      - name: Run Ansible playbook
+        env:
+          MQTT_PASSWORD: ${{ secrets.MQTT_PASSWORD }}
+        run: |
+          ansible-playbook -i ansible/inventory.ini ansible/site.yml
+
+  - id: verify
+    kind: verify
+    needs: [configure]
+    timeout_minutes: 10
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+      TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+      TF_VAR_mqtt_password: ${{ secrets.MQTT_PASSWORD }}
+    steps:
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.5
+      - name: Get Elastic IP
+        id: get_eip
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+            -backend-config="region=us-east-1"
+          echo "eip=$(terraform output -raw elastic_ip)" >> "$GITHUB_OUTPUT"
+        working-directory: infra
+      - name: Install MQTT client
+        run: pip install paho-mqtt
+      - name: Verify MQTT broker is reachable
+        env:
+          MQTT_PASSWORD: ${{ secrets.MQTT_PASSWORD }}
+        run: |
+          python3 - <<'PYEOF'
+          import paho.mqtt.client as mqtt
+          import os, sys, time
+
+          HOST = "${{ steps.get_eip.outputs.eip }}"
+          PORT = 1883
+          USER = "opsagent"
+          PASS = os.environ["MQTT_PASSWORD"]
+
+          connected = False
+          def on_connect(client, userdata, flags, rc):
+              global connected
+              connected = (rc == 0)
+
+          client = mqtt.Client()
+          client.username_pw_set(USER, PASS)
+          client.on_connect = on_connect
+
+          for attempt in range(10):
+              try:
+                  client.connect(HOST, PORT, 10)
+                  client.loop_start()
+                  time.sleep(3)
+                  client.loop_stop()
+                  if connected:
+                      print(f"MQTT broker reachable at {HOST}:{PORT}")
+                      sys.exit(0)
+              except Exception as e:
+                  print(f"Attempt {attempt+1}/10 failed: {e}")
+                  time.sleep(15)
+
+          print("MQTT broker did not respond after 10 attempts")
+          sys.exit(1)
+          PYEOF
+
+rollback:
+  strategy: manual
