@@ -25,22 +25,14 @@
       register: apt_update
       until: apt_update is succeeded
 
-    - name: Install Docker dependencies and mosquitto (provides mosquitto_passwd)
+    - name: Install Docker dependencies
       ansible.builtin.apt:
         name:
           - ca-certificates
           - curl
           - gnupg
           - lsb-release
-          - mosquitto
         state: present
-
-    - name: Stop and disable system mosquitto service (we run it in Docker)
-      ansible.builtin.service:
-        name: mosquitto
-        state: stopped
-        enabled: false
-      failed_when: false
 
     - name: Add Docker GPG key
       ansible.builtin.shell:
@@ -82,7 +74,7 @@
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
-        mode: "0755"
+        mode: "0777"
       loop:
         - "{{ mosquitto_config_dir }}"
         - "{{ mosquitto_data_dir }}"
@@ -94,25 +86,35 @@
         dest: "{{ mosquitto_config_dir }}/mosquitto.conf"
         mode: "0644"
 
-    - name: Ensure passwd file exists (idempotent touch)
+    - name: Create empty passwd file
       ansible.builtin.file:
         path: "{{ mosquitto_config_dir }}/passwd"
         state: touch
-        mode: "0600"
+        mode: "0666"
       changed_when: false
 
-    - name: Create or update MQTT user in passwd file
+    - name: Generate Mosquitto passwd file using container (correct PBKDF2 format)
       ansible.builtin.shell:
-        cmd: mosquitto_passwd -b {{ mosquitto_config_dir }}/passwd {{ mqtt_user }} {{ mqtt_password }}
+        cmd: >
+          docker run --rm
+          --entrypoint mosquitto_passwd
+          -v {{ mosquitto_config_dir }}:/mosquitto/config
+          eclipse-mosquitto:2
+          -b /mosquitto/config/passwd {{ mqtt_user }} {{ mqtt_password }}
       no_log: true
       changed_when: true
 
-    - name: Stop existing Mosquitto container (if any)
+    - name: Set password file permissions
+      ansible.builtin.file:
+        path: "{{ mosquitto_config_dir }}/passwd"
+        mode: "0600"
+
+    - name: Stop and remove existing Mosquitto container (if any)
       ansible.builtin.shell:
-        cmd: docker rm -f mosquitto || true
+        cmd: docker rm -f mosquitto 2>/dev/null || true
       changed_when: false
 
-    - name: Run Mosquitto container
+    - name: Run Mosquitto broker container
       ansible.builtin.shell:
         cmd: |
           docker run -d \
@@ -128,9 +130,24 @@
       register: container_start
       changed_when: container_start.rc == 0
 
+    - name: Wait 5 seconds for container to initialize
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: Show container logs (for diagnostics)
+      ansible.builtin.shell:
+        cmd: docker logs mosquitto 2>&1
+      register: container_logs
+      changed_when: false
+      failed_when: false
+
+    - name: Print container logs
+      ansible.builtin.debug:
+        msg: "{{ container_logs.stdout_lines }}"
+
     - name: Wait for MQTT port to be available
       ansible.builtin.wait_for:
         port: 1883
         host: "127.0.0.1"
-        delay: 3
-        timeout: 60
+        delay: 5
+        timeout: 90
