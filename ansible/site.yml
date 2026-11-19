@@ -25,15 +25,22 @@
       register: apt_update
       until: apt_update is succeeded
 
-    - name: Install Docker dependencies and mosquitto-clients
+    - name: Install Docker dependencies and mosquitto (provides mosquitto_passwd)
       ansible.builtin.apt:
         name:
           - ca-certificates
           - curl
           - gnupg
           - lsb-release
-          - mosquitto-clients
+          - mosquitto
         state: present
+
+    - name: Stop and disable system mosquitto service (we run it in Docker)
+      ansible.builtin.service:
+        name: mosquitto
+        state: stopped
+        enabled: false
+      failed_when: false
 
     - name: Add Docker GPG key
       ansible.builtin.shell:
@@ -87,16 +94,18 @@
         dest: "{{ mosquitto_config_dir }}/mosquitto.conf"
         mode: "0644"
 
-    - name: Create Mosquitto password file with opsagent user
-      ansible.builtin.shell:
-        cmd: mosquitto_passwd -b -c {{ mosquitto_config_dir }}/passwd {{ mqtt_user }} {{ mqtt_password }}
-      no_log: true
-      changed_when: true
-
-    - name: Set password file permissions
+    - name: Ensure passwd file exists (idempotent touch)
       ansible.builtin.file:
         path: "{{ mosquitto_config_dir }}/passwd"
+        state: touch
         mode: "0600"
+      changed_when: false
+
+    - name: Create or update MQTT user in passwd file
+      ansible.builtin.shell:
+        cmd: mosquitto_passwd -b {{ mosquitto_config_dir }}/passwd {{ mqtt_user }} {{ mqtt_password }}
+      no_log: true
+      changed_when: true
 
     - name: Stop existing Mosquitto container (if any)
       ansible.builtin.shell:
