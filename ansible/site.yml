@@ -70,11 +70,13 @@
         state: started
         enabled: true
 
-    - name: Create Mosquitto directories
+    - name: Create Mosquitto directories owned by uid 1883 (mosquitto container user)
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
-        mode: "0777"
+        owner: "1883"
+        group: "1883"
+        mode: "0755"
       loop:
         - "{{ mosquitto_config_dir }}"
         - "{{ mosquitto_data_dir }}"
@@ -84,30 +86,30 @@
       ansible.builtin.template:
         src: mosquitto.conf.j2
         dest: "{{ mosquitto_config_dir }}/mosquitto.conf"
+        owner: "1883"
+        group: "1883"
         mode: "0644"
 
-    - name: Create empty passwd file
+    - name: Create empty passwd file owned by uid 1883
       ansible.builtin.file:
         path: "{{ mosquitto_config_dir }}/passwd"
         state: touch
-        mode: "0666"
+        owner: "1883"
+        group: "1883"
+        mode: "0600"
       changed_when: false
 
     - name: Generate Mosquitto passwd file using container (correct PBKDF2 format)
       ansible.builtin.shell:
         cmd: >
           docker run --rm
+          --user 1883:1883
           --entrypoint mosquitto_passwd
           -v {{ mosquitto_config_dir }}:/mosquitto/config
           eclipse-mosquitto:2
           -b /mosquitto/config/passwd {{ mqtt_user }} {{ mqtt_password }}
       no_log: true
       changed_when: true
-
-    - name: Set password file permissions
-      ansible.builtin.file:
-        path: "{{ mosquitto_config_dir }}/passwd"
-        mode: "0600"
 
     - name: Stop and remove existing Mosquitto container (if any)
       ansible.builtin.shell:
